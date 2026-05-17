@@ -3,18 +3,17 @@ import sqlite3
 DB_PATH = "database.db"
 
 MENU_SEED = [
-    ("Coffee", "Latte", 5.50, 1),
-    ("Coffee", "Cappuccino", 5.20, 1),
-    ("Coffee", "Flat White", 5.30, 1),
-    ("Cold Drinks", "Iced Coffee", 6.00, 1),
-    ("Cold Drinks", "Iced Chocolate", 6.20, 1),
-    ("Food", "Chicken Wrap", 9.50, 1),
-    ("Food", "Veggie Toastie", 8.50, 1),
-    ("Food", "Banana Bread", 4.80, 1),
-    ("Dessert", "Blueberry Muffin", 4.50, 1),
-    ("Dessert", "Chocolate Brownie", 5.00, 1),
+    ("Coffee", "Latte", 5.50, "Smooth espresso with steamed milk and a light foam finish.", "images/latte.svg", 1),
+    ("Coffee", "Cappuccino", 5.20, "Classic espresso topped with thick foam and cocoa dusting.", "images/cappuccino.svg", 1),
+    ("Coffee", "Flat White", 5.30, "Rich espresso blended with velvety microfoam.", "images/flat_white.svg", 1),
+    ("Cold Drinks", "Iced Coffee", 6.00, "Chilled espresso over ice with milk and optional sweetness.", "images/iced_coffee.svg", 1),
+    ("Cold Drinks", "Iced Chocolate", 6.20, "Cold chocolate drink served over ice with creamy texture.", "images/iced_chocolate.svg", 1),
+    ("Food", "Chicken Wrap", 9.50, "Grilled chicken, fresh salad and sauce wrapped for quick lunch.", "images/chicken_wrap.svg", 1),
+    ("Food", "Veggie Toastie", 8.50, "Toasted sandwich with vegetables, cheese and savoury filling.", "images/veggie_toastie.svg", 1),
+    ("Food", "Banana Bread", 4.80, "Moist banana bread slice, ideal with coffee.", "images/banana_bread.svg", 1),
+    ("Dessert", "Blueberry Muffin", 4.50, "Soft muffin with blueberry pieces and a lightly sweet finish.", "images/blueberry_muffin.svg", 1),
+    ("Dessert", "Chocolate Brownie", 5.00, "Dense chocolate brownie with a rich cocoa flavour.", "images/brownie.svg", 1),
 ]
-
 USER_SEED = [
     ("staff", "staff123", "Staff Member", "staff"),
     ("admin", "admin123", "Cafe Owner", "admin"),
@@ -35,6 +34,7 @@ cur.execute(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_code TEXT UNIQUE,
         customer_name TEXT NOT NULL,
+        table_number TEXT NOT NULL DEFAULT 'Takeaway',
         item_name TEXT NOT NULL,
         quantity INTEGER NOT NULL,
         unit_price REAL NOT NULL,
@@ -51,6 +51,8 @@ if "order_code" not in existing_order_columns:
     cur.execute("ALTER TABLE orders ADD COLUMN order_code TEXT")
 if "notes" not in existing_order_columns:
     cur.execute("ALTER TABLE orders ADD COLUMN notes TEXT")
+if "table_number" not in existing_order_columns:
+    cur.execute("ALTER TABLE orders ADD COLUMN table_number TEXT NOT NULL DEFAULT 'Takeaway'")
 
 cur.execute(
     """
@@ -59,10 +61,18 @@ cur.execute(
         category TEXT NOT NULL,
         name TEXT NOT NULL,
         price REAL NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        image_url TEXT NOT NULL DEFAULT 'images/fallback.svg',
         is_available INTEGER NOT NULL DEFAULT 1
     )
     """
 )
+
+existing_menu_columns = column_names(conn, "menu_items")
+if "description" not in existing_menu_columns:
+    cur.execute("ALTER TABLE menu_items ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+if "image_url" not in existing_menu_columns:
+    cur.execute("ALTER TABLE menu_items ADD COLUMN image_url TEXT NOT NULL DEFAULT 'images/fallback.svg'")
 
 cur.execute(
     """
@@ -77,7 +87,21 @@ cur.execute(
 )
 
 if cur.execute("SELECT COUNT(*) FROM menu_items").fetchone()[0] == 0:
-    cur.executemany("INSERT INTO menu_items (category, name, price, is_available) VALUES (?, ?, ?, ?)", MENU_SEED)
+    cur.executemany(
+        "INSERT INTO menu_items (category, name, price, description, image_url, is_available) VALUES (?, ?, ?, ?, ?, ?)",
+        MENU_SEED,
+    )
+else:
+    for category, name, price, description, image_url, is_available in MENU_SEED:
+        cur.execute(
+            """
+            UPDATE menu_items
+            SET description = COALESCE(NULLIF(description, ''), ?),
+                image_url = COALESCE(NULLIF(image_url, ''), ?)
+            WHERE name = ?
+            """,
+            (description, image_url, name),
+        )
 
 if cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
     cur.executemany("INSERT INTO users (username, password, display_name, role) VALUES (?, ?, ?, ?)", USER_SEED)

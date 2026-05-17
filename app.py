@@ -6,6 +6,9 @@ import sqlite3
 from contextlib import closing
 from functools import wraps
 import secrets
+from urllib.parse import urlparse
+import qrcode
+from qrcode.image.svg import SvgImage
 
 
 app = Flask(__name__)
@@ -39,6 +42,18 @@ def login_required(view_func):
 def current_user():
     return session.get("user")
 
+def menu_image_src(image_url: str) -> str:
+    """Return a usable image URL for menu cards. Supports external URLs and static image paths."""
+    if not image_url:
+        return url_for("static", filename="images/fallback.svg")
+    parsed = urlparse(image_url)
+    if parsed.scheme in {"http", "https"}:
+        return image_url
+    return url_for("static", filename=image_url.lstrip("/"))
+
+@app.context_processor
+def inject_helpers():
+    return {"menu_image_src": menu_image_src}
 
 def generate_order_code(length: int = 8) -> str:
     return secrets.token_hex(length // 2).upper()
@@ -73,6 +88,7 @@ def prepare_order_rows(rows):
         order = dict(row)
         order["status_help"] = STATUS_HELP_TEXT.get(order["status"], "")
         order["estimated_minutes"] = estimate_prep_time(order["quantity"], order["status"])
+        order["service_type"] = "Takeaway" if order.get("table_number") == "Takeaway" else f"Table {order.get('table_number')}"
         prepared.append(order)
     return prepared
 
@@ -129,9 +145,9 @@ def menu():
         params.append(category)
 
     if search:
-        query += " AND (name LIKE ? OR category LIKE ?)"
+        query += " AND (name LIKE ? OR category LIKE ? OR description LIKE ?)"
         like_value = f"%{search}%"
-        params.extend([like_value, like_value])
+        params.extend([like_value, like_value, like_value])
 
     query += " ORDER BY category, name"
 
@@ -163,6 +179,12 @@ def create_order(item_id):
         customer_name = request.form.get("customer_name", "").strip()
         quantity_raw = request.form.get("quantity", "").strip()
         notes = request.form.get("notes", "").strip()
+        table_number = request.form.get("table_number", "Takeaway").strip() or "Takeaway"
+        valid_tables = {"Takeaway"} | {str(i) for i in range(1, 21)}
+
+        if table_number not in valid_tables:
+            flash("Please select a valid table number or takeaway option.", "error")
+            return redirect(url_for("create_order", item_id=item_id))
 
         if not customer_name or not quantity_raw:
             flash("Customer name and quantity are required.", "error")
@@ -187,14 +209,15 @@ def create_order(item_id):
             conn.execute(
                 """
                 INSERT INTO orders (
-                    order_code, customer_name, item_name, quantity,
+                    order_code, customer_name, table_number,item_name, quantity,
                     unit_price, total_price, notes, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order_code,
                     customer_name,
+                    table_number,
                     item["name"],
                     quantity,
                     float(item["price"]),
@@ -248,24 +271,17 @@ def orders():
         params.append(status_filter)
 
     if search:
-        query += " AND (order_code LIKE ? OR customer_name LIKE ? OR item_name LIKE ?)"
+        query += " AND (order_code LIKE ? OR customer_name LIKE ? OR item_name LIKE ? OR table_number LIKE ?)"
         like_value = f"%{search}%"
-        params.extend([like_value, like_value, like_value])
+        params.extend([like_value, like_value, like_value, like_value])
 
     query += " ORDER BY created_at DESC"
 
     with closing(get_db_connection()) as conn:
         orders = conn.execute(query, params).fetchall()
+    return render_template("orders.html", orders=prepare_order_rows(orders), valid_statuses=STAFF_STATUSES, all_statuses=VALID_STATUSES, status_filter=status_filter, search=search)
+        
 
-    orders = prepare_order_rows(orders)
-
-    return render_template(
-        "orders.html",
-        orders=orders,
-        valid_statuses=VALID_STATUSES,
-        status_filter=status_filter,
-        search=search,
-    )
 
 
 @app.route("/update_status/<int:order_id>", methods=["POST"])
@@ -297,6 +313,13 @@ def edit_order(order_id):
         customer_name = request.form.get("customer_name", "").strip()
         quantity_raw = request.form.get("quantity", "").strip()
         notes = request.form.get("notes", "").strip()
+        table_number = request.form.get("table_number", order["table_number"]).strip() or "Takeaway"
+        valid_tables = {"Takeaway"} | {str(i) for i in range(1, 21)}
+
+        if table_number not in valid_tables:
+            flash("Please select a valid table number or takeaway option.", "error")
+            return redirect(url_for("edit_order", order_id=order_id))
+        
         status = request.form.get("status", order["status"])
         if not customer_name or len(customer_name) < 2:
             flash("Customer name must contain at least 2 characters.", "error")
@@ -314,8 +337,8 @@ def edit_order(order_id):
         total_price = float(order["unit_price"]) * quantity
         with closing(get_db_connection()) as conn:
             conn.execute(
-                "UPDATE orders SET customer_name = ?, quantity = ?, total_price = ?, notes = ?, status = ? WHERE id = ?",
-                (customer_name, quantity, total_price, notes, status, order_id),
+                "UPDATE orders SET customer_name = ?, table_number = ?, quantity = ?, total_price = ?, notes = ?, status = ? WHERE id = ?",
+                (customer_name, table_number, quantity, total_price, notes, status, order_id),
             )
             conn.commit()
         flash("Order updated successfully.", "success")
@@ -337,7 +360,7 @@ def cancel_order(order_id):
 def export_orders():
     with closing(get_db_connection()) as conn:
         rows = conn.execute(
-            "SELECT order_code, customer_name, item_name, quantity, unit_price, total_price, status, created_at FROM orders ORDER BY created_at DESC"
+            "SELECT order_code, customer_name, table_number, item_name, quantity, unit_price, total_price, status, created_at FROM orders ORDER BY created_at DESC"
         ).fetchall()
 
     output = io.StringIO()
@@ -345,6 +368,7 @@ def export_orders():
     writer.writerow([
         "Order Code",
         "Customer Name",
+         "Table/Service",
         "Item Name",
         "Quantity",
         "Unit Price",
@@ -357,6 +381,7 @@ def export_orders():
         writer.writerow([
             row["order_code"],
             row["customer_name"],
+            row["table_number"],
             row["item_name"],
             row["quantity"],
             row["unit_price"],
@@ -376,8 +401,10 @@ def admin_menu():
         category = request.form.get("category", "").strip()
         name = request.form.get("name", "").strip()
         price_raw = request.form.get("price", "").strip()
-        if not category or not name or not price_raw:
-            flash("Category, name and price are required.", "error")
+        description = request.form.get("description", "").strip()
+        image_url = request.form.get("image_url", "").strip() or "images/fallback.svg"
+        if not category or not name or not price_raw or not description:
+            flash("Category, name , price and description are required.", "error")
             return redirect(url_for("admin_menu"))
         try:
             price = float(price_raw)
@@ -387,7 +414,7 @@ def admin_menu():
             flash("Price must be a valid positive number.", "error")
             return redirect(url_for("admin_menu"))
         with closing(get_db_connection()) as conn:
-            conn.execute("INSERT INTO menu_items (category, name, price, is_available) VALUES (?, ?, ?, 1)", (category, name, price))
+            conn.execute("INSERT INTO menu_items (category, name, price, description, image_url, is_available) VALUES (?, ?, ?, ?, ?, 1)", (category, name, price, description, image_url))
             conn.commit()
         flash("Menu item added successfully.", "success")
         return redirect(url_for("admin_menu"))
@@ -408,6 +435,21 @@ def toggle_menu_item(item_id):
             conn.commit()
             flash("Menu item availability updated.", "success")
     return redirect(url_for("admin_menu"))
+
+@app.route("/qr")
+def qr_page():
+    app_url = request.url_root.rstrip("/") + url_for("menu")
+    return render_template("qr.html", app_url=app_url)
+
+
+@app.route("/qr/menu.svg")
+def qr_menu_svg():
+    app_url = request.url_root.rstrip("/") + url_for("menu")
+    img = qrcode.make(app_url, image_factory=SvgImage)
+    output = io.BytesIO()
+    img.save(output)
+    return Response(output.getvalue(), mimetype="image/svg+xml")
+
 
 @app.route("/dashboard")
 @login_required
@@ -455,6 +497,15 @@ def dashboard():
             ORDER BY hour_label
             LIMIT 12
             """
+         ).fetchall()
+        active_tables = conn.execute(
+            """
+            SELECT table_number, COUNT(*) AS order_count
+            FROM orders
+            WHERE table_number != 'Takeaway' AND status IN ('Pending', 'Preparing', 'Ready')
+            GROUP BY table_number
+            ORDER BY CAST(table_number AS INTEGER)
+            """    
         ).fetchall()
         recent_orders = conn.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 5").fetchall()
     return render_template(
@@ -468,6 +519,7 @@ def dashboard():
         daily_summary=daily_summary,
         hourly_summary=hourly_summary,
         recent_orders=prepare_order_rows(recent_orders),
+         active_tables=active_tables,
     )
 
 if __name__ == "__main__":
